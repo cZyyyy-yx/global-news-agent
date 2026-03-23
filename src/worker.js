@@ -152,7 +152,7 @@ async function buildReport(env) {
     }
   }
 
-  return buildFallbackReport(items, warnings);
+  return await buildFallbackReport(items, warnings);
 }
 
 async function collectNews() {
@@ -415,41 +415,223 @@ function parseResponseOutputText(raw) {
   return chunks.join("").trim();
 }
 
-function buildFallbackReport(items, warnings) {
-  const enrichedItems = items.map((item) => {
-    const significance = assessSignificance(item);
-    const hasEnergy = ["oil", "gas", "energy", "hormuz", "shipping"].some((word) => containsKeyword(`${item.title} ${item.summary}`, word));
+async function buildFallbackReport(items, warnings) {
+  const enrichedItems = await Promise.all(items.map(async (item) => {
+    const translatedTitle = await translateText(item.title);
+    const translatedSummary = await translateText(item.summary || item.title);
+    const analysis = fallbackAnalysis(item);
     return {
       title: item.title,
-      title_cn: item.title,
+      title_cn: polishCnTitle(translatedTitle || item.title),
       category: item.category,
       region: item.region,
-      significance,
+      significance: analysis.significance,
       original_summary_en: item.summary || item.title,
-      summary_cn: item.summary || item.title,
-      impact_cn: hasEnergy ? "事件可能通过能源和航运渠道外溢到更广泛市场。" : "事件短期内主要影响风险偏好和政策预期。",
-      economic_impact_cn: hasEnergy ? "宏观上重点看能源、运价和通胀预期是否重定价。" : "宏观影响仍需观察是否进入增长、监管或贸易层面。",
-      asset_impact_cn: hasEnergy ? "原油、黄金和航运链相对更敏感。" : "市场初期更可能围绕情绪和避险资产波动。",
-      china_sector_impact_cn: "中国相关行业需关注供应链、外贸、能源成本和运力扰动。",
-      china_impact_cn: "对中国的影响取决于事件是否继续外溢到贸易、能源或监管领域。",
-      market_impact_cn: "市场可能先做情绪定价，再根据后续政策与基本面修正。",
-      watchpoints_cn: "关注官方表态、二次升级以及资产价格的联动反馈。",
+      summary_cn: polishCnSummary(translatedSummary || item.summary || item.title, item.title),
+      impact_cn: analysis.impact_cn,
+      economic_impact_cn: analysis.economic_impact_cn,
+      asset_impact_cn: analysis.asset_impact_cn,
+      china_sector_impact_cn: analysis.china_sector_impact_cn,
+      china_impact_cn: analysis.china_impact_cn,
+      market_impact_cn: analysis.market_impact_cn,
+      watchpoints_cn: analysis.watchpoints_cn,
       event_date: item.published || isoDate(),
       source_name: item.source,
       source_url: item.link,
     };
-  });
+  }));
 
   return {
     generated_at: isoDate(),
     source_mode: "rss_edge_fallback",
-    executive_summary: "日报基于边缘侧 RSS 聚合即时生成，当前未启用 OpenAI 中文深度整理。",
-    china_brief: "中国视角下建议优先观察能源、贸易链路和外部风险偏好的传导。",
+    executive_summary: buildExecutiveSummary(enrichedItems),
+    china_brief: buildChinaBrief(enrichedItems),
     market_brief: "市场层面优先关注能源、汇率、避险资产和科技板块的联动。",
-    watchlist: ["主要经济体政策表态", "能源与航运扰动", "全球股债汇二次定价", "科技与安全监管变化"],
+    watchlist: buildWatchlist(warnings),
     items: enrichedItems,
     warnings,
   };
+}
+
+async function translateText(text) {
+  const cleaned = cleanText(text);
+  if (!cleaned) return "";
+  if (/[\u4e00-\u9fff]/.test(cleaned)) return cleaned;
+  const endpoints = [
+    "https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=zh-CN&dt=t&q=" + encodeURIComponent(cleaned),
+    "https://api.mymemory.translated.net/get?q=" + encodeURIComponent(cleaned) + "&langpair=en|zh-CN",
+  ];
+  for (const url of endpoints) {
+    try {
+      const response = await fetch(url, { headers: { "user-agent": "global-news-agent-worker/1.0" } });
+      if (!response.ok) continue;
+      if (url.includes("translate.googleapis.com")) {
+        const parsed = await response.json();
+        const translated = (parsed[0] || []).map((part) => part && part[0] ? part[0] : "").join("").trim();
+        if (translated) return translated;
+      } else {
+        const parsed = await response.json();
+        const translated = cleanText(parsed?.responseData?.translatedText || "");
+        if (translated) return translated;
+      }
+    } catch (_error) {
+      continue;
+    }
+  }
+  return cleaned;
+}
+
+function polishCnTitle(text) {
+  let value = cleanText(text);
+  if (!value) return "";
+  value = value.replace(/^中文标题[:：]\s*/i, "");
+  value = value.replace(/直播[:：]?/g, "");
+  value = value.replace(/\s*\([^()]*\)/g, "");
+  value = value.replace(/\s+/g, " ").trim().replace(/[ .;；，,]+$/g, "");
+  return value;
+}
+
+function polishCnSummary(text, originalTitle = "") {
+  let value = cleanText(text);
+  if (!value) return polishCnTitle(originalTitle);
+  value = value.replace(/继续阅读[。.…]*/gi, "");
+  value = value.replace(/Continue reading[。.…]*/gi, "");
+  value = value.replace(/^我们了解[^，。:：]*[，。:：]\s*/u, "");
+  value = value.replace(/^最新消息[，。:：]\s*/u, "");
+  value = value.replace(/^直播[：:]\s*/u, "");
+  value = value.replace(/\s*\([^()]*\)/g, "");
+  value = value.replace(/\s+/g, " ").trim().replace(/[ .;；，,]+$/g, "");
+  const parts = value.split(/[。！？]/).map((part) => part.trim()).filter(Boolean);
+  const dedup = [];
+  const seen = new Set();
+  for (const part of parts) {
+    const normalized = part.replace(/\s+/g, "");
+    if (normalized.length < 8 || seen.has(normalized)) continue;
+    seen.add(normalized);
+    dedup.push(part);
+    if (dedup.length >= 2) break;
+  }
+  value = dedup.length ? dedup.join("。") + "。" : value;
+  if (value.length > 88 && value.includes("。")) value = value.split("。")[0].trim() + "。";
+  return value || polishCnTitle(originalTitle);
+}
+
+function fallbackAnalysis(item) {
+  const text = `${item.title} ${item.summary}`.toLowerCase();
+  const hasEnergy = ["oil", "gas", "energy", "hormuz", "shipping"].some((word) => containsKeyword(text, word));
+  const hasPolicy = ["fed", "rate", "inflation", "tariff", "sanction", "policy", "shutdown"].some((word) => containsKeyword(text, word));
+  const hasTech = ["ai", "chip", "semiconductor", "cyber", "software", "data"].some((word) => containsKeyword(text, word));
+  const hasConflict = ["war", "missile", "military", "strike", "nuclear", "conflict"].some((word) => containsKeyword(text, word));
+  const hasConsumption = ["airport", "travel", "consumer", "concert", "tourism"].some((word) => containsKeyword(text, word));
+
+  let impactParts;
+  let chinaParts;
+  let marketParts;
+  let economicParts;
+  let assetParts;
+  let chinaSectorParts;
+
+  if (item.category === "地缘政治") {
+    impactParts = ["事件会先影响区域安全预期。", hasEnergy ? "若波及能源运输，全球风险资产和通胀预期会一起受扰动。" : "后续要看是否外溢到制裁、航运或外交升级。"];
+    chinaParts = ["中国层面主要看能源进口、航运安全和外交平衡。"];
+    if (["中东", "欧洲"].includes(item.region)) chinaParts.push("若冲突持续，相关原材料和远洋链路的稳定性会更关键。");
+    marketParts = ["市场通常先交易避险情绪。", hasEnergy ? "原油、黄金与航运链条更容易成为第一反应资产。" : "汇率、黄金和国防链弹性可能更明显。"];
+    economicParts = ["宏观上要看能源、贸易和运价是否被重新定价。"];
+    if (hasPolicy) economicParts.push("如果伴随制裁升级，外贸和资本流向也会受影响。");
+    assetParts = ["资产层面偏利多避险资产和上游资源。"];
+    if (hasConflict) assetParts.push("航空、可选消费和高估值成长板块相对承压。");
+    chinaSectorParts = ["中国行业链条重点看油气、航运、化工和外贸制造。"];
+    if (hasTech) chinaSectorParts.push("若牵涉技术限制，电子和通信链也要防二次冲击。");
+  } else if (item.category === "经济金融") {
+    impactParts = ["事件更容易改变利率预期、汇率走势和跨境资本流向。"];
+    if (hasEnergy) impactParts.push("如果能源价格同步波动，全球通胀路径会更复杂。");
+    chinaParts = ["中国主要看外需、人民币汇率和政策对冲空间。"];
+    if (hasPolicy) chinaParts.push("出口链和稳增长政策的节奏可能需要重新评估。");
+    marketParts = ["股债汇商品会围绕政策预期重新定价。"];
+    economicParts = ["核心观察点是增长、通胀、利率和贸易条件是否同时发生变化。"];
+    assetParts = ["美元、美债、黄金、工业品和权益风格切换是主要交易线索。"];
+    chinaSectorParts = ["中国相关行业重点看出口制造、金融地产、大宗原材料和高股息资产。"];
+  } else if (item.category === "科技产业") {
+    impactParts = ["事件会先影响 AI、芯片、网络安全和关键供应链预期。"];
+    if (hasPolicy) impactParts.push("若伴随监管或出口限制，全球科技链会更快重估。");
+    chinaParts = ["中国重点看技术管制、国产替代和产业链再配置。"];
+    marketParts = ["科技股估值、半导体和算力链对消息面最敏感。"];
+    economicParts = ["宏观上传导到资本开支、生产率预期和科技投资周期。"];
+    assetParts = ["半导体、云计算、AI 应用与网络安全板块波动会更明显。"];
+    chinaSectorParts = ["中国受影响方向主要是算力、芯片设备、工业软件和国产替代链条。"];
+  } else if (item.category === "气候灾害") {
+    impactParts = ["事件会冲击局部供应链、物流和保险成本。"];
+    if (hasEnergy) impactParts.push("若波及港口或能源产区，影响会明显放大。");
+    chinaParts = ["中国要看进口原料、航运时效和制造交付是否受牵连。"];
+    marketParts = ["能源、航运、保险和公用事业相关资产更敏感。"];
+    economicParts = ["宏观影响通常体现为供给收缩、物流受阻和重建支出抬升。"];
+    assetParts = ["商品、航运、保险和公用事业板块更容易出现相对收益。"];
+    chinaSectorParts = ["相关产业链重点看上游原料、港口物流和制造排产。"];
+  } else if (item.category === "公共卫生") {
+    impactParts = ["事件会影响公共卫生政策、跨境流动和服务消费预期。"];
+    chinaParts = ["中国重点观察跨境流动、医疗物资和风险沟通节奏。"];
+    marketParts = ["旅游、消费和医药板块容易出现分化交易。"];
+    economicParts = ["宏观上传导到服务消费恢复、劳动力供给和出行活动。"];
+    assetParts = ["医药、航空、酒店和可选消费更容易出现分化。"];
+    chinaSectorParts = ["中国相关方向主要是医疗供应链、出行消费和跨境商务活动。"];
+  } else {
+    impactParts = ["短期内重点看事件是否继续扩散到政策、贸易或市场层面。"];
+    if (hasConsumption) impactParts.push("如果影响居民出行或消费，服务业预期会更快反映。");
+    chinaParts = ["与中国的直接关联暂时有限，但要持续看贸易、舆情和外交层面变化。"];
+    marketParts = ["市场初期更多受情绪驱动，后续取决于政策和基本面确认。"];
+    economicParts = ["宏观影响仍需观察是否演变为增长、成本或监管变量。"];
+    assetParts = ["资产价格会先做情绪定价，再看基本面是否跟进。"];
+    chinaSectorParts = ["对中国行业的传导还不清晰，先看供应链、贸易和监管信号。"];
+  }
+
+  const watchpoints = [];
+  if (["oil", "gas", "hormuz", "sanction", "tariff"].some((word) => containsKeyword(text, word))) watchpoints.push("关注能源价格、航运路线和制裁措施是否升级。");
+  if (["fed", "rate", "inflation", "jobs", "bond"].some((word) => containsKeyword(text, word))) watchpoints.push("关注后续数据和央行表态是否修正利率预期。");
+  if (["chip", "ai", "cyber", "software"].some((word) => containsKeyword(text, word))) watchpoints.push("关注技术出口限制、企业财报与监管动作。");
+  if (!watchpoints.length) watchpoints.push("关注官方声明、二次传播和市场反馈。");
+
+  return {
+    significance: assessSignificance(item),
+    impact_cn: impactParts.join(" "),
+    economic_impact_cn: economicParts.join(" "),
+    asset_impact_cn: assetParts.join(" "),
+    china_sector_impact_cn: chinaSectorParts.join(" "),
+    china_impact_cn: chinaParts.join(" "),
+    market_impact_cn: marketParts.join(" "),
+    watchpoints_cn: watchpoints.join(" "),
+  };
+}
+
+function buildExecutiveSummary(items) {
+  const categoryCounts = countBy(items, "category");
+  const topCategories = [...categoryCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name]) => name);
+  return `今日全球重点集中在${topCategories.length ? topCategories.join("、") : "多领域事件"}，需同时关注政策表态与市场定价。`;
+}
+
+function buildChinaBrief(items) {
+  const regionCounts = countBy(items, "region");
+  const topRegions = [...regionCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 2).map(([name]) => name);
+  return `中国相关观察重点在${topRegions.length ? topRegions.join("、") : "外部需求与供应链"}的外溢影响。`;
+}
+
+function buildWatchlist(warnings) {
+  const watchlist = [
+    "主要经济体最新政策表态",
+    "能源价格与航运扰动是否扩大",
+    "全球股债汇是否出现二次定价",
+    "科技与安全监管是否加码",
+  ];
+  if (warnings.length) watchlist.push("关注新闻源缺口是否影响事件覆盖面");
+  return watchlist.slice(0, 5);
+}
+
+function countBy(items, key) {
+  const counter = new Map();
+  for (const item of items) {
+    const name = item[key] || "未知";
+    counter.set(name, (counter.get(name) || 0) + 1);
+  }
+  return counter;
 }
 
 function isoDate() {
