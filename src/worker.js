@@ -110,6 +110,10 @@ export default {
       return json(await buildTrendSnapshot(env));
     }
 
+    if (url.pathname === "/api/search") {
+      return json(await searchHistory(env, url.searchParams.get("q") || ""));
+    }
+
     return new Response(buildDashboardHtml(), {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -730,6 +734,59 @@ async function buildTrendSnapshot(env) {
   };
 }
 
+async function searchHistory(env, query) {
+  const needle = cleanText(query).toLowerCase();
+  if (!needle) {
+    return { storage_enabled: !!env.REPORTS_KV, items: [], message: "Empty query." };
+  }
+  if (!env.REPORTS_KV || typeof env.REPORTS_KV.get !== "function") {
+    return {
+      storage_enabled: false,
+      items: [],
+      message: "REPORTS_KV not configured. Search is disabled until KV is bound.",
+    };
+  }
+
+  const historyPayload = await listHistory(env);
+  const results = [];
+  for (const entry of (historyPayload.items || []).slice(0, 20)) {
+    try {
+      const raw = await env.REPORTS_KV.get(entry.key, "text");
+      if (!raw) continue;
+      const report = JSON.parse(raw);
+      for (const item of report.items || []) {
+        const haystack = [
+          item.title,
+          item.title_cn,
+          item.summary_cn,
+          item.original_summary_en,
+          item.category,
+          item.region,
+          item.source_name,
+        ].map((value) => cleanText(value)).join(" ").toLowerCase();
+        if (!haystack.includes(needle)) continue;
+        results.push({
+          generated_at: report.generated_at || "",
+          snapshot_key: entry.key,
+          title: item.title || "",
+          title_cn: item.title_cn || "",
+          category: item.category || "",
+          region: item.region || "",
+          source_name: item.source_name || "",
+          event_date: item.event_date || "",
+          source_url: item.source_url || "",
+        });
+        if (results.length >= 30) {
+          return { storage_enabled: true, items: results };
+        }
+      }
+    } catch (_error) {
+      continue;
+    }
+  }
+  return { storage_enabled: true, items: results };
+}
+
 function incMap(map, key) {
   map.set(key, (map.get(key) || 0) + 1);
 }
@@ -782,6 +839,8 @@ function buildDashboardHtml() {
     .panel{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 18px 36px rgba(0,0,0,.06)}
     .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:16px}
     .insight{display:grid;grid-template-columns:1.1fr .9fr;gap:16px;margin-top:18px}
+    .search-box{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+    .search-box input{flex:1 1 220px;border:1px solid var(--line);border-radius:14px;padding:11px 12px;background:#fff;color:var(--ink)}
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:18px}
     .card{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:18px}
     .eyebrow{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
@@ -814,8 +873,13 @@ function buildDashboardHtml() {
     <section class="summary" id="summary"></section>
     <section class="insight">
       <section class="panel">
-        <h3>历史归档</h3>
-        <div class="mini-list" id="historyList"><div class="mini-item">正在加载...</div></div>
+        <h3>历史搜索</h3>
+        <div class="search-box">
+          <input id="searchInput" type="search" placeholder="搜索历史标题、摘要、来源，例如 Iran / 芯片 / 美联储">
+          <button class="secondary" id="searchBtn">搜索</button>
+        </div>
+        <div class="mini-list" id="searchList"><div class="mini-item">输入关键词后可搜索历史归档。</div></div>
+        <div class="mini-list" id="historyList" style="margin-top:12px;"><div class="mini-item">正在加载...</div></div>
       </section>
       <section class="panel">
         <h3>趋势看板</h3>
@@ -828,6 +892,9 @@ function buildDashboardHtml() {
   <script>
     const statusNode = document.getElementById('status');
     const summaryNode = document.getElementById('summary');
+    const searchInput = document.getElementById('searchInput');
+    const searchBtn = document.getElementById('searchBtn');
+    const searchNode = document.getElementById('searchList');
     const historyNode = document.getElementById('historyList');
     const trendNode = document.getElementById('trendList');
     const cardsNode = document.getElementById('cards');
@@ -881,6 +948,25 @@ function buildDashboardHtml() {
       }
       historyNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.generated_at || '') + '</strong><div>模式: ' + escapeHtml(item.source_mode || '') + '</div><div>事件数: ' + escapeHtml(String(item.event_count || 0)) + '</div><div>' + escapeHtml((item.top_titles || []).slice(0, 2).join(' / ')) + '</div></div>').join('');
     }
+    async function runSearch() {
+      const q = (searchInput && searchInput.value || '').trim();
+      if (!q) {
+        searchNode.innerHTML = '<div class="mini-item">输入关键词后可搜索历史归档。</div>';
+        return;
+      }
+      const response = await fetch('/api/search?q=' + encodeURIComponent(q));
+      const payload = await response.json();
+      if (!payload.storage_enabled) {
+        searchNode.innerHTML = '<div class="mini-item">' + escapeHtml(payload.message || 'Search disabled') + '</div>';
+        return;
+      }
+      const items = payload.items || [];
+      if (!items.length) {
+        searchNode.innerHTML = '<div class="mini-item">没有匹配到历史事件。</div>';
+        return;
+      }
+      searchNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.title_cn || item.title || '') + '</strong><div>' + escapeHtml(item.generated_at || '') + ' | ' + escapeHtml(item.category || '') + ' | ' + escapeHtml(item.region || '') + ' | ' + escapeHtml(item.source_name || '') + '</div><div><a href="' + escapeHtml(item.source_url || '#') + '" target="_blank" rel="noreferrer">原始链接</a></div></div>').join('');
+    }
     async function loadTrends() {
       const response = await fetch('/api/trends');
       const payload = await response.json();
@@ -899,6 +985,8 @@ function buildDashboardHtml() {
       return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
     document.getElementById('refreshBtn').addEventListener('click', () => loadReport(true).catch(showError));
+    if (searchBtn) searchBtn.addEventListener('click', () => runSearch().catch(() => null));
+    if (searchInput) searchInput.addEventListener('keydown', (event) => { if (event.key === 'Enter') runSearch().catch(() => null); });
     function showError(error) {
       statusNode.textContent = '加载失败: ' + String(error && error.message ? error.message : error);
     }
