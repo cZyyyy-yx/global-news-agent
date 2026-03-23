@@ -1,0 +1,6 @@
+.dev.vars
+__pycache__/
+*.pyc
+data/
+reports/
+cloudflared.exe

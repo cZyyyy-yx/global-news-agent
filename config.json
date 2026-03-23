@@ -1,0 +1,46 @@
+{
+  "mode": "auto",
+  "max_items_per_feed": 12,
+  "top_events": 8,
+  "report_timezone": "Asia/Shanghai",
+  "openai_model": "gpt-5-mini",
+  "openai_reasoning_effort": "low",
+  "openai_web_search_enabled": true,
+  "openai_rss_rewrite_enabled": true,
+  "notification": {
+    "email_enabled": false,
+    "webhook_enabled": false,
+    "chat_webhook_enabled": false,
+    "email_subject_prefix": "全球大事智能日报"
+  },
+  "rss_feeds": [
+    {
+      "name": "Reuters World",
+      "url": "https://feeds.reuters.com/Reuters/worldNews"
+    },
+    {
+      "name": "BBC World",
+      "url": "http://feeds.bbci.co.uk/news/world/rss.xml"
+    },
+    {
+      "name": "AP Top News",
+      "url": "https://apnews.com/hub/ap-top-news?output=rss"
+    },
+    {
+      "name": "NPR World",
+      "url": "https://feeds.npr.org/1004/rss.xml"
+    },
+    {
+      "name": "The Guardian World",
+      "url": "https://www.theguardian.com/world/rss"
+    },
+    {
+      "name": "Al Jazeera",
+      "url": "https://www.aljazeera.com/xml/rss/all.xml"
+    },
+    {
+      "name": "DW World",
+      "url": "https://rss.dw.com/rdf/rss-en-world"
+    }
+  ]
+}

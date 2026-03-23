@@ -1,0 +1,6 @@
+name = "global-news-agent"
+main = "src/worker.js"
+compatibility_date = "2026-03-23"
+
+[observability]
+enabled = true
