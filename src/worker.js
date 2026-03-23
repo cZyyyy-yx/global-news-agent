@@ -102,6 +102,14 @@ export default {
       return handleReportRequest(request, env, ctx, refresh);
     }
 
+    if (url.pathname === "/api/history") {
+      return json(await listHistory(env));
+    }
+
+    if (url.pathname === "/api/trends") {
+      return json(await buildTrendSnapshot(env));
+    }
+
     return new Response(buildDashboardHtml(), {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -124,6 +132,7 @@ async function handleReportRequest(request, env, ctx, refresh) {
     "cache-control": `public, max-age=${CACHE_TTL_SECONDS}`,
   });
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
+  ctx.waitUntil(persistReport(env, report));
   return response;
 }
 
@@ -634,6 +643,112 @@ function countBy(items, key) {
   return counter;
 }
 
+async function persistReport(env, report) {
+  if (!env.REPORTS_KV || typeof env.REPORTS_KV.put !== "function") return;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const reportKey = `report:${stamp}`;
+  const meta = {
+    key: reportKey,
+    generated_at: report.generated_at || isoDate(),
+    source_mode: report.source_mode || "",
+    event_count: Array.isArray(report.items) ? report.items.length : 0,
+    top_titles: (report.items || []).slice(0, 3).map((item) => item.title_cn || item.title || ""),
+  };
+
+  let history = [];
+  try {
+    history = JSON.parse(await env.REPORTS_KV.get("history:index", "text") || "[]");
+  } catch (_error) {
+    history = [];
+  }
+  history = [meta, ...history.filter((item) => item.key !== reportKey)].slice(0, 30);
+
+  await Promise.all([
+    env.REPORTS_KV.put(reportKey, JSON.stringify(report)),
+    env.REPORTS_KV.put("history:index", JSON.stringify(history)),
+    env.REPORTS_KV.put("history:latest", JSON.stringify(meta)),
+  ]);
+}
+
+async function listHistory(env) {
+  if (!env.REPORTS_KV || typeof env.REPORTS_KV.get !== "function") {
+    return {
+      storage_enabled: false,
+      items: [],
+      message: "REPORTS_KV not configured. Deploy works, but history is disabled until KV is bound.",
+    };
+  }
+  try {
+    const items = JSON.parse(await env.REPORTS_KV.get("history:index", "text") || "[]");
+    return { storage_enabled: true, items };
+  } catch (_error) {
+    return { storage_enabled: true, items: [], message: "History index is empty or unreadable." };
+  }
+}
+
+async function buildTrendSnapshot(env) {
+  const historyPayload = await listHistory(env);
+  if (!historyPayload.storage_enabled) {
+    return {
+      storage_enabled: false,
+      snapshot_count: 0,
+      category_counts: [],
+      region_counts: [],
+      keyword_counts: [],
+      message: historyPayload.message,
+    };
+  }
+
+  const historyItems = historyPayload.items || [];
+  const reports = [];
+  for (const entry of historyItems.slice(0, 20)) {
+    try {
+      const raw = await env.REPORTS_KV.get(entry.key, "text");
+      if (raw) reports.push(JSON.parse(raw));
+    } catch (_error) {
+      continue;
+    }
+  }
+
+  const categoryCounts = new Map();
+  const regionCounts = new Map();
+  const keywordCounts = new Map();
+  for (const report of reports) {
+    for (const item of report.items || []) {
+      incMap(categoryCounts, item.category || "综合");
+      incMap(regionCounts, item.region || "全球");
+      for (const token of tokenizeTitle(item.title || "")) incMap(keywordCounts, token);
+    }
+  }
+
+  return {
+    storage_enabled: true,
+    snapshot_count: reports.length,
+    category_counts: toSortedArray(categoryCounts, 6),
+    region_counts: toSortedArray(regionCounts, 6),
+    keyword_counts: toSortedArray(keywordCounts, 10),
+  };
+}
+
+function incMap(map, key) {
+  map.set(key, (map.get(key) || 0) + 1);
+}
+
+function toSortedArray(map, limit) {
+  return [...map.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([name, count]) => ({ name, count }));
+}
+
+function tokenizeTitle(title) {
+  const stopwords = new Set(["the", "and", "for", "with", "from", "after", "into", "amid", "says", "say", "over", "near", "week", "this", "that", "will", "have", "has", "are", "was", "iran", "israel", "trump", "world", "news"]);
+  return cleanText(title)
+    .toLowerCase()
+    .match(/[a-z]{3,}/g)
+    ?.filter((token) => !stopwords.has(token)) || [];
+}
+
 function isoDate() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -666,6 +781,7 @@ function buildDashboardHtml() {
     .secondary{background:#fff;color:var(--ink);border:1px solid var(--line)}
     .panel{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 18px 36px rgba(0,0,0,.06)}
     .summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:16px}
+    .insight{display:grid;grid-template-columns:1.1fr .9fr;gap:16px;margin-top:18px}
     .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:16px;margin-top:18px}
     .card{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:18px}
     .eyebrow{font-size:12px;color:var(--muted);letter-spacing:.08em;text-transform:uppercase}
@@ -677,8 +793,10 @@ function buildDashboardHtml() {
     .card p{line-height:1.7;margin:10px 0}
     .status{margin-top:14px;color:var(--muted)}
     .warning{margin-top:18px;padding:16px;border-radius:18px;background:rgba(177,74,34,.08);border:1px solid rgba(177,74,34,.22)}
+    .mini-list{display:grid;gap:10px}
+    .mini-item{border:1px solid var(--line);border-radius:16px;padding:12px;background:rgba(255,255,255,.72)}
     a{color:var(--accent);text-decoration:none}
-    @media (max-width:900px){.summary{grid-template-columns:1fr}}
+    @media (max-width:900px){.summary,.insight{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -694,12 +812,24 @@ function buildDashboardHtml() {
       <div class="status" id="status">正在加载报告...</div>
     </section>
     <section class="summary" id="summary"></section>
+    <section class="insight">
+      <section class="panel">
+        <h3>历史归档</h3>
+        <div class="mini-list" id="historyList"><div class="mini-item">正在加载...</div></div>
+      </section>
+      <section class="panel">
+        <h3>趋势看板</h3>
+        <div class="mini-list" id="trendList"><div class="mini-item">正在加载...</div></div>
+      </section>
+    </section>
     <section class="cards" id="cards"></section>
     <section class="warning" id="warning" hidden></section>
   </main>
   <script>
     const statusNode = document.getElementById('status');
     const summaryNode = document.getElementById('summary');
+    const historyNode = document.getElementById('historyList');
+    const trendNode = document.getElementById('trendList');
     const cardsNode = document.getElementById('cards');
     const warningNode = document.getElementById('warning');
     async function loadReport(refresh) {
@@ -737,6 +867,34 @@ function buildDashboardHtml() {
         warningNode.hidden = true;
       }
     }
+    async function loadHistory() {
+      const response = await fetch('/api/history');
+      const payload = await response.json();
+      if (!payload.storage_enabled) {
+        historyNode.innerHTML = '<div class="mini-item">' + escapeHtml(payload.message || 'History disabled') + '</div>';
+        return;
+      }
+      const items = payload.items || [];
+      if (!items.length) {
+        historyNode.innerHTML = '<div class="mini-item">历史归档为空。先刷新几次日报或绑定定时触发。</div>';
+        return;
+      }
+      historyNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.generated_at || '') + '</strong><div>模式: ' + escapeHtml(item.source_mode || '') + '</div><div>事件数: ' + escapeHtml(String(item.event_count || 0)) + '</div><div>' + escapeHtml((item.top_titles || []).slice(0, 2).join(' / ')) + '</div></div>').join('');
+    }
+    async function loadTrends() {
+      const response = await fetch('/api/trends');
+      const payload = await response.json();
+      if (!payload.storage_enabled) {
+        trendNode.innerHTML = '<div class="mini-item">' + escapeHtml(payload.message || 'Trend storage disabled') + '</div>';
+        return;
+      }
+      trendNode.innerHTML = [
+        '<div class="mini-item"><strong>快照数</strong><div>' + escapeHtml(String(payload.snapshot_count || 0)) + '</div></div>',
+        '<div class="mini-item"><strong>高频类别</strong><div>' + escapeHtml((payload.category_counts || []).map((x) => x.name + ' ' + x.count).join(' / ')) + '</div></div>',
+        '<div class="mini-item"><strong>高频区域</strong><div>' + escapeHtml((payload.region_counts || []).map((x) => x.name + ' ' + x.count).join(' / ')) + '</div></div>',
+        '<div class="mini-item"><strong>英文主题词</strong><div>' + escapeHtml((payload.keyword_counts || []).map((x) => x.name + ' ' + x.count).join(' / ')) + '</div></div>'
+      ].join('');
+    }
     function escapeHtml(value) {
       return String(value || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
@@ -745,6 +903,8 @@ function buildDashboardHtml() {
       statusNode.textContent = '加载失败: ' + String(error && error.message ? error.message : error);
     }
     loadReport(false).catch(showError);
+    loadHistory().catch(() => null);
+    loadTrends().catch(() => null);
   </script>
 </body>
 </html>`;

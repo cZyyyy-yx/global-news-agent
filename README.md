@@ -75,6 +75,11 @@ This no-API version already includes:
 - dashboard page
 - JSON report API
 
+Optional history mode:
+
+- if you later bind a Cloudflare KV namespace as `REPORTS_KV`, the Worker will also persist recent reports
+- once KV is bound, `/api/history` and `/api/trends` become active automatically
+
 ## Optional OpenAI Upgrade
 
 If you later get an OpenAI key, add it as a secret to improve Chinese quality:
@@ -102,6 +107,8 @@ This gives you automatic redeploys on every push to the main branch.
 - `GET /`: dashboard
 - `GET /api/report`: latest report JSON
 - `GET /api/report?refresh=1`: bypass cache and regenerate
+- `GET /api/history`: recent archived report metadata if `REPORTS_KV` is configured
+- `GET /api/trends`: simple trend summary if `REPORTS_KV` is configured
 - `GET /api/health`: health check
 
 ## Notes
@@ -110,4 +117,5 @@ This gives you automatic redeploys on every push to the main branch.
 - The current edge version does not yet persist historical archives.
 - The no-API version is now treated as a valid first deployment target.
 - If you later add `OPENAI_API_KEY`, the Worker will use it as an enhancement, not as a hard dependency.
-- If you want long-term history, the next step is adding KV, D1, or R2 storage.
+- The current code already supports optional KV-based history through `REPORTS_KV`.
+- If you want richer long-term history, search, or analytics, the next step is expanding this into KV + D1 or R2 storage.
