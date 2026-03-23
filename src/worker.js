@@ -114,6 +114,10 @@ export default {
       return json(await searchHistory(env, url.searchParams.get("q") || ""));
     }
 
+    if (url.pathname === "/api/archive") {
+      return json(await loadArchive(env, url.searchParams.get("key") || ""));
+    }
+
     return new Response(buildDashboardHtml(), {
       headers: {
         "content-type": "text/html; charset=utf-8",
@@ -500,6 +504,9 @@ function polishCnTitle(text) {
   value = value.replace(/^中文标题[:：]\s*/i, "");
   value = value.replace(/直播[:：]?/g, "");
   value = value.replace(/\s*\([^()]*\)/g, "");
+  value = value.replace(/\bPM\b/g, "总理");
+  value = value.replace(/\bUS\b/g, "美国");
+  value = value.replace(/\bUK\b/g, "英国");
   value = value.replace(/\s+/g, " ").trim().replace(/[ .;；，,]+$/g, "");
   return value;
 }
@@ -513,6 +520,9 @@ function polishCnSummary(text, originalTitle = "") {
   value = value.replace(/^最新消息[，。:：]\s*/u, "");
   value = value.replace(/^直播[：:]\s*/u, "");
   value = value.replace(/\s*\([^()]*\)/g, "");
+  value = value.replace(/\bU-S\b/g, "美国");
+  value = value.replace(/\bU\.S\.\b/g, "美国");
+  value = value.replace(/\bPM\b/g, "总理");
   value = value.replace(/\s+/g, " ").trim().replace(/[ .;；，,]+$/g, "");
   const parts = value.split(/[。！？]/).map((part) => part.trim()).filter(Boolean);
   const dedup = [];
@@ -526,6 +536,7 @@ function polishCnSummary(text, originalTitle = "") {
   }
   value = dedup.length ? dedup.join("。") + "。" : value;
   if (value.length > 88 && value.includes("。")) value = value.split("。")[0].trim() + "。";
+  if (/^[A-Za-z0-9 ,.'":;()\-]+$/.test(value)) return polishCnTitle(originalTitle);
   return value || polishCnTitle(originalTitle);
 }
 
@@ -787,6 +798,29 @@ async function searchHistory(env, query) {
   return { storage_enabled: true, items: results };
 }
 
+async function loadArchive(env, key) {
+  const safeKey = cleanText(key);
+  if (!safeKey) {
+    return { storage_enabled: !!env.REPORTS_KV, report: null, message: "Missing archive key." };
+  }
+  if (!env.REPORTS_KV || typeof env.REPORTS_KV.get !== "function") {
+    return {
+      storage_enabled: false,
+      report: null,
+      message: "REPORTS_KV not configured. Archive detail is disabled until KV is bound.",
+    };
+  }
+  try {
+    const raw = await env.REPORTS_KV.get(safeKey, "text");
+    if (!raw) {
+      return { storage_enabled: true, report: null, message: "Archive not found." };
+    }
+    return { storage_enabled: true, report: JSON.parse(raw) };
+  } catch (_error) {
+    return { storage_enabled: true, report: null, message: "Archive could not be loaded." };
+  }
+}
+
 function incMap(map, key) {
   map.set(key, (map.get(key) || 0) + 1);
 }
@@ -903,6 +937,9 @@ function buildDashboardHtml() {
       statusNode.textContent = refresh ? '正在刷新...' : '正在加载报告...';
       const response = await fetch('/api/report' + (refresh ? '?refresh=1' : ''));
       const report = await response.json();
+      renderReport(report);
+    }
+    function renderReport(report) {
       statusNode.textContent = '生成日期: ' + (report.generated_at || '') + ' | 模式: ' + (report.source_mode || '');
       summaryNode.innerHTML = [
         ['总览', report.executive_summary || ''],
@@ -934,6 +971,21 @@ function buildDashboardHtml() {
         warningNode.hidden = true;
       }
     }
+    async function loadArchive(key) {
+      if (!key) return;
+      statusNode.textContent = '正在加载历史快照...';
+      const response = await fetch('/api/archive?key=' + encodeURIComponent(key));
+      const payload = await response.json();
+      if (!payload.storage_enabled) {
+        statusNode.textContent = payload.message || 'Archive disabled';
+        return;
+      }
+      if (!payload.report) {
+        statusNode.textContent = payload.message || 'Archive not found';
+        return;
+      }
+      renderReport(payload.report);
+    }
     async function loadHistory() {
       const response = await fetch('/api/history');
       const payload = await response.json();
@@ -946,7 +998,10 @@ function buildDashboardHtml() {
         historyNode.innerHTML = '<div class="mini-item">历史归档为空。先刷新几次日报或绑定定时触发。</div>';
         return;
       }
-      historyNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.generated_at || '') + '</strong><div>模式: ' + escapeHtml(item.source_mode || '') + '</div><div>事件数: ' + escapeHtml(String(item.event_count || 0)) + '</div><div>' + escapeHtml((item.top_titles || []).slice(0, 2).join(' / ')) + '</div></div>').join('');
+      historyNode.innerHTML = items.map((item) => '<button class="mini-item" data-archive-key="' + escapeHtml(item.key || '') + '" style="text-align:left;cursor:pointer;"><strong>' + escapeHtml(item.generated_at || '') + '</strong><div>模式: ' + escapeHtml(item.source_mode || '') + '</div><div>事件数: ' + escapeHtml(String(item.event_count || 0)) + '</div><div>' + escapeHtml((item.top_titles || []).slice(0, 2).join(' / ')) + '</div></button>').join('');
+      historyNode.querySelectorAll('[data-archive-key]').forEach((node) => {
+        node.addEventListener('click', () => loadArchive(node.getAttribute('data-archive-key')).catch(() => null));
+      });
     }
     async function runSearch() {
       const q = (searchInput && searchInput.value || '').trim();
@@ -965,7 +1020,10 @@ function buildDashboardHtml() {
         searchNode.innerHTML = '<div class="mini-item">没有匹配到历史事件。</div>';
         return;
       }
-      searchNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.title_cn || item.title || '') + '</strong><div>' + escapeHtml(item.generated_at || '') + ' | ' + escapeHtml(item.category || '') + ' | ' + escapeHtml(item.region || '') + ' | ' + escapeHtml(item.source_name || '') + '</div><div><a href="' + escapeHtml(item.source_url || '#') + '" target="_blank" rel="noreferrer">原始链接</a></div></div>').join('');
+      searchNode.innerHTML = items.map((item) => '<div class="mini-item"><strong>' + escapeHtml(item.title_cn || item.title || '') + '</strong><div>' + escapeHtml(item.generated_at || '') + ' | ' + escapeHtml(item.category || '') + ' | ' + escapeHtml(item.region || '') + ' | ' + escapeHtml(item.source_name || '') + '</div><div style="margin-top:8px;display:flex;gap:10px;flex-wrap:wrap;"><button data-archive-key="' + escapeHtml(item.snapshot_key || '') + '" class="secondary">查看快照</button><a href="' + escapeHtml(item.source_url || '#') + '" target="_blank" rel="noreferrer">原始链接</a></div></div>').join('');
+      searchNode.querySelectorAll('[data-archive-key]').forEach((node) => {
+        node.addEventListener('click', () => loadArchive(node.getAttribute('data-archive-key')).catch(() => null));
+      });
     }
     async function loadTrends() {
       const response = await fetch('/api/trends');

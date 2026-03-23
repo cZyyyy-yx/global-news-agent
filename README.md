@@ -80,6 +80,22 @@ Optional history mode:
 - if you later bind a Cloudflare KV namespace as `REPORTS_KV`, the Worker will also persist recent reports
 - once KV is bound, `/api/history`, `/api/search`, and `/api/trends` become active automatically
 
+KV setup example:
+
+1. Create a KV namespace in Cloudflare.
+2. Add it to `wrangler.toml`, for example:
+
+```toml
+[[kv_namespaces]]
+binding = "REPORTS_KV"
+id = "your_production_kv_namespace_id"
+preview_id = "your_preview_kv_namespace_id"
+```
+
+3. Redeploy the Worker.
+
+After that, history, search, trends, and archive detail will persist automatically.
+
 ## Optional OpenAI Upgrade
 
 If you later get an OpenAI key, add it as a secret to improve Chinese quality:
@@ -110,6 +126,7 @@ This gives you automatic redeploys on every push to the main branch.
 - `GET /api/history`: recent archived report metadata if `REPORTS_KV` is configured
 - `GET /api/search?q=keyword`: history search if `REPORTS_KV` is configured
 - `GET /api/trends`: simple trend summary if `REPORTS_KV` is configured
+- `GET /api/archive?key=...`: archived report detail if `REPORTS_KV` is configured
 - `GET /api/health`: health check
 
 ## Notes
